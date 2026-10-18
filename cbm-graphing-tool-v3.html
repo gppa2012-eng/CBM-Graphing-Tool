@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CBM Graphing Tool</title>
+<script>
+window.addEventListener('error', function(e){
+  var box = document.getElementById('errBox');
+  if (!box){
+    box = document.createElement('div');
+    box.id = 'errBox';
+    box.style.cssText = 'background:#fff3cd;border:2px solid #000;padding:10px;margin:10px 20px;font:13px Arial;white-space:pre-wrap';
+    document.addEventListener('DOMContentLoaded', function(){ document.body.prepend(box); });
+  }
+  box.textContent = 'Error: ' + (e.message || 'unknown') + (e.lineno ? ' (line ' + e.lineno + ')' : '');
+});
+</script>
+<style>
+  :root { --gold:#ffc629; --black:#000; --grey:#f4f4f4; --line:#d0d0d0; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:Arial,Helvetica,sans-serif; color:var(--black); background:#fff; }
+  header { background:var(--black); color:var(--gold); padding:16px 20px; }
+  header h1 { margin:0; font-size:20px; }
+  main { max-width:960px; margin:0 auto; padding:20px; }
+  section { border:1px solid var(--line); border-radius:6px; padding:16px; margin-bottom:20px; }
+  h2 { margin:0 0 12px; font-size:16px; border-bottom:3px solid var(--gold); padding-bottom:6px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; }
+  label { display:block; font-size:13px; font-weight:bold; margin-bottom:4px; }
+  input, select { width:100%; padding:8px; font-size:14px; border:1px solid #999; border-radius:4px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { border-bottom:1px solid var(--line); padding:6px; text-align:left; }
+  th { background:var(--grey); }
+  td input, td select { padding:4px; }
+  button { background:var(--gold); color:var(--black); border:2px solid var(--black); padding:8px 14px; font-weight:bold; border-radius:4px; cursor:pointer; margin-top:12px; margin-right:8px; }
+  button.secondary { background:#fff; }
+  .msg { color:#a00; font-size:13px; margin-top:8px; min-height:16px; }
+  .summary { font-size:14px; line-height:1.7; margin-bottom:8px; }
+  svg { width:100%; height:auto; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header><h1>Curriculum-based measure (CBM) Graphing Tool</h1></header>
+<main>
+
+<section>
+  <h2>Learner</h2>
+  <div class="grid">
+    <div><label for="assessDate">Date of Assessment</label><input id="assessDate" type="date"></div>
+    <div><label for="name">Name</label><input id="name"></div>
+    <div><label for="age">Age</label><input id="age" type="number" min="4" max="20"></div>
+    <div><label for="grade">Grade</label><select id="grade"></select></div>
+    <div><label for="cbm">Curriculum Based Measure (CBM)</label><select id="cbm"></select></div>
+    <div><label for="level">Reading Level of Measure</label><select id="level"></select></div>
+    <div><label for="sdqa">SDQA Instructional Level</label><select id="sdqa"></select></div>
+  </div>
+</section>
+
+<section>
+  <h2>Sessions</h2>
+  <table>
+    <thead>
+      <tr><th>Sessions</th><th style="width:190px">Measure Used</th><th style="width:150px">Total Responses</th><th style="width:110px">Errors</th><th>Correct Responses Per Minute</th></tr>
+    </thead>
+    <tbody id="sessionBody"></tbody>
+  </table>
+  <button id="graphBtn">Graph it</button>
+  <button id="goalBtn" class="secondary">Add Goal Line</button>
+  <button id="resetBtn" class="secondary">Reset</button>
+  <div class="msg" id="msg"></div>
+</section>
+
+<section id="graphSec" class="hidden">
+  <h2>Graph</h2>
+  <div class="summary" id="summary"></div>
+  <div id="chart"></div>
+</section>
+
+</main>
+<script>
+try {
+const ROWS = 3;             // sessions entered in the table (all baseline)
+const AXIS_SESSIONS = 18;   // sessions shown on the graph and covered by the goal line
+const GOLD = '#ffc629';
+const CBM_OPTIONS = {
+  PSF: 'Phoneme Segmentation Fluency',
+  WRF: 'Word Reading Fluency',
+  PRF: 'Passage Reading Fluency'
+};
+const GRADES = ['PK','K','1','2','3','4','5','6','7','8','9','10','11','12','College'];
+const GRADE_LABEL = g => g === 'PK' ? 'Pre-K' : g === 'College' ? 'College Level' : g;
+const READING_LEVELS = ['K','1','2','3','4','5','6','7','8'];
+const SDQA_LEVELS = ['Pre-K','K','1','2','3','4','5','6','7','8','9','10','11'];
+
+function emptySession(){ return { form:'', total:'', errors:'' }; }
+function freshState(){
+  return { name:'', age:'', grade:'K', cbm:'PSF', readingLevel:'', sdqaLevel:'',
+           sessions: Array.from({length:ROWS}, emptySession), showGoal:false, graphed:false };
+}
+let state = load() || freshState();
+{
+  const old = state.sessions || [];
+  state.sessions = Array.from({length:ROWS}, (_,i) => Object.assign(emptySession(), old[i] || {}));
+}
+
+function load(){ try { return JSON.parse(localStorage.getItem('cbm-tool-v3')||'null'); } catch(e){ return null; } }
+function save(){ try { localStorage.setItem('cbm-tool-v3', JSON.stringify(state)); } catch(e){} }
+function $(id){ return document.getElementById(id); }
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fillSelect(el, items, labelFn){
+  el.innerHTML = items.map(v => `<option value="${v}">${labelFn ? labelFn(v) : v}</option>`).join('');
+}
+function fillSelectWithBlank(el, items, labelFn){
+  el.innerHTML = `<option value="">Select</option>` + items.map(v => `<option value="${v}">${labelFn ? labelFn(v) : v}</option>`).join('');
+}
+
+fillSelect($('grade'), GRADES, GRADE_LABEL);
+fillSelectWithBlank($('level'), READING_LEVELS);
+fillSelectWithBlank($('sdqa'), SDQA_LEVELS);
+
+// PK, K, and grade 1: PSF, WRF, PRF. Grades 2-3: WRF, PRF. Grades 4-12: PRF.
+function cbmChoicesFor(grade){
+  if (grade === 'PK' || grade === 'K' || grade === '1') return ['PSF','WRF','PRF'];
+  if (['2','3'].includes(grade)) return ['WRF','PRF'];
+  return ['PRF'];
+}
+function refreshCBM(){
+  const choices = cbmChoicesFor($('grade').value);
+  const keep = choices.includes(state.cbm) ? state.cbm : choices[0];
+  $('cbm').innerHTML = choices.map(c => `<option value="${c}">${CBM_OPTIONS[c]}</option>`).join('');
+  $('cbm').value = keep;
+}
+$('grade').addEventListener('change', refreshCBM);
+
+function buildTable(){
+  let html = '';
+  for (let i=0;i<ROWS;i++){
+    html += `<tr><td>Session ${i+1}</td>`
+      + `<td><select id="f${i}"><option value="">Select</option><option>Form 1</option><option>Form 2</option><option>Form 3</option></select></td>`
+      + `<td><input type="number" min="0" id="t${i}"></td>`
+      + `<td><input type="number" min="0" id="e${i}"></td>`
+      + `<td id="c${i}"></td></tr>`;
+  }
+  $('sessionBody').innerHTML = html;
+  for (let i=0;i<ROWS;i++){
+    ['t','e'].forEach(p => $(p+i).addEventListener('input', updateComputed));
+  }
+}
+
+// Correct responses per minute = total responses minus errors (1-minute probe)
+function cwpmOf(s){
+  if (s.total === '' || s.errors === '' || s.total == null || s.errors == null) return null;
+  return Number(s.total) - Number(s.errors);
+}
+
+function readInputs(){
+  for (let i=0;i<ROWS;i++){
+    state.sessions[i].form = $('f'+i).value;
+    state.sessions[i].total = $('t'+i).value;
+    state.sessions[i].errors = $('e'+i).value;
+  }
+  state.name = $('name').value.trim();
+  state.age = $('age').value;
+  state.grade = $('grade').value;
+  state.cbm = $('cbm').value;
+  state.readingLevel = $('level').value;
+  state.sdqaLevel = $('sdqa').value;
+  state.assessDate = $('assessDate').value;
+}
+
+function updateComputed(){
+  for (let i=0;i<ROWS;i++){
+    const v = cwpmOf({total:$('t'+i).value, errors:$('e'+i).value});
+    $('c'+i).textContent = (v === null || isNaN(v)) ? '' : v;
+  }
+}
+
+function validate(){
+  for (let i=0;i<ROWS;i++){
+    const t = $('t'+i).value, e = $('e'+i).value;
+    if ((t === '') !== (e === '')) return `Session ${i+1}: enter both total responses and errors.`;
+    if (t !== '' && Number(e) > Number(t)) return `Session ${i+1}: errors cannot be more than total responses.`;
+    if (t === '') return 'Enter total responses and errors for Sessions 1–3.';
+  }
+  return '';
+}
+
+function median3(vals){
+  const s = [...vals].sort((a,b) => a-b);
+  return s[1];
+}
+
+function draw(){
+  const vals = state.sessions.map(cwpmOf);
+  const med = vals.every(v => v !== null) ? median3(vals) : null;
+  const aimEnd = med !== null ? med + (AXIS_SESSIONS - 1) : null;  // 1 point per session
+
+  const W=700, H=420, pl=60, pr=20, pt=34, pb=56;
+  const cw = W-pl-pr, ch = H-pt-pb;
+  const plotted = vals.filter(v => v !== null);
+  const top = Math.max(...plotted, state.showGoal && aimEnd !== null ? aimEnd : 0, 5);
+  const yMax = Math.ceil(top / 5) * 5;
+  const x = s => pl + ((s-1) / (AXIS_SESSIONS-1)) * cw;
+  const y = v => pt + ch - (v / yMax) * ch;
+  const yLabel = state.cbm === 'PSF' ? 'Correct Phonemes Per Minute' : 'Correct Words Per Minute';
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+  for (let v=0; v<=yMax; v+=5){
+    svg += `<line x1="${pl}" x2="${W-pr}" y1="${y(v)}" y2="${y(v)}" stroke="#eee"/>`;
+    svg += `<text x="${pl-8}" y="${y(v)+4}" font-size="11" text-anchor="end">${v}</text>`;
+  }
+  for (let s=1; s<=AXIS_SESSIONS; s++){
+    svg += `<text x="${x(s)}" y="${H-pb+16}" font-size="11" text-anchor="middle">${s}</text>`;
+  }
+  svg += `<text x="${W/2}" y="${H-8}" font-size="12" text-anchor="middle">Session</text>`;
+  svg += `<text x="16" y="${pt+ch/2}" font-size="12" text-anchor="middle" transform="rotate(-90 16 ${pt+ch/2})">${yLabel}</text>`;
+  svg += `<line x1="${pl}" x2="${pl}" y1="${pt}" y2="${pt+ch}" stroke="#000"/>`;
+  svg += `<line x1="${pl}" x2="${W-pr}" y1="${pt+ch}" y2="${pt+ch}" stroke="#000"/>`;
+
+  // Phase change line between baseline (Sessions 1–3) and intervention (Session 4 on)
+  const xPhase = (x(ROWS) + x(ROWS+1)) / 2;
+  svg += `<line x1="${xPhase}" x2="${xPhase}" y1="${pt}" y2="${pt+ch}" stroke="#000" stroke-width="1.5" stroke-dasharray="4,4"/>`;
+  svg += `<text x="${xPhase}" y="${pt-10}" font-size="11" text-anchor="middle">Phase change</text>`;
+
+  if (med !== null){
+    const topBase = Math.max(...vals);
+    svg += `<text x="${x(2)}" y="${y(topBase)-20}" font-size="12" font-weight="bold" text-anchor="middle">Baseline</text>`;
+  }
+
+  // Goal line: median at Session 1, rising 1 point per session to Session 18
+  if (state.showGoal && med !== null){
+    svg += `<line x1="${x(1)}" y1="${y(med)}" x2="${x(AXIS_SESSIONS)}" y2="${y(aimEnd)}" stroke="#000" stroke-width="2" stroke-dasharray="6,4"/>`;
+    svg += `<text x="${x(AXIS_SESSIONS)-6}" y="${y(aimEnd)-10}" font-size="11" text-anchor="end">Goal ${aimEnd}</text>`;
+  }
+
+  vals.forEach((v, i) => {
+    if (v === null) return;
+    svg += `<circle cx="${x(i+1)}" cy="${y(v)}" r="8" fill="${GOLD}" stroke="#000" stroke-width="2"/>`;
+  });
+  svg += `</svg>`;
+  $('chart').innerHTML = svg;
+
+  let summary = `<b>${escapeHtml(state.name)}</b>, grade ${GRADE_LABEL(state.grade)}, ${CBM_OPTIONS[state.cbm]}<br>`;
+  if (med !== null){
+    summary += `Baseline (median of Sessions 1–3): <b>${med}</b>`;
+  }
+  if (state.showGoal && aimEnd !== null){
+    summary += ` &nbsp; Goal at Session 18: <b>${aimEnd}</b> (1 point per session)`;
+  }
+  $('summary').innerHTML = summary;
+}
+
+function setMsg(t){ $('msg').textContent = t; }
+
+$('graphBtn').addEventListener('click', () => {
+  readInputs();
+  const err = validate();
+  if (err){ setMsg(err); return; }
+  setMsg('');
+  state.graphed = true;
+  save();
+  $('graphSec').classList.remove('hidden');
+  draw();
+});
+
+$('goalBtn').addEventListener('click', () => {
+  readInputs();
+  const err = validate();
+  if (err){ setMsg(err); return; }
+  setMsg('');
+  state.showGoal = true;
+  state.graphed = true;
+  save();
+  $('graphSec').classList.remove('hidden');
+  draw();
+});
+
+$('resetBtn').addEventListener('click', () => {
+  if (!confirm('Clear all data?')) return;
+  try { localStorage.removeItem('cbm-tool-v3'); } catch(e){}
+  location.reload();
+});
+
+function showAll(){
+  buildTable();
+  $('name').value = state.name || '';
+  $('age').value = state.age || '';
+  $('grade').value = state.grade || 'K';
+  refreshCBM();
+  $('cbm').value = state.cbm;
+  $('level').value = state.readingLevel || '';
+  $('sdqa').value = state.sdqaLevel || '';
+  $('assessDate').value = state.assessDate || '';
+  state.sessions.forEach((s,i) => {
+    $('f'+i).value = s.form || '';
+    $('t'+i).value = s.total;
+    $('e'+i).value = s.errors;
+  });
+  updateComputed();
+  if (state.graphed){
+    $('graphSec').classList.remove('hidden');
+    draw();
+  }
+}
+
+showAll();
+} catch (err) {
+  var box = document.createElement('pre');
+  box.style.cssText = 'background:#fff3cd;border:2px solid #000;padding:10px;margin:10px 20px;font:13px Arial;white-space:pre-wrap';
+  box.textContent = 'Error: ' + (err && err.message) + '\n' + (err && err.stack);
+  document.body.prepend(box);
+}
+</script>
+</body>
+</html>
